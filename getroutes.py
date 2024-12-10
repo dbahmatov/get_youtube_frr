@@ -80,27 +80,6 @@ def summarize_routes(ip_ranges):
         return ip_ranges
 
 
-# Удалить все текущие маршруты
-def remove_existing_routes(router_id):
-    try:
-        command = f"""
-        configure terminal
-        router bgp {router_id}
-        no network 0.0.0.0/0
-        """
-        subprocess.run(
-            ["vtysh", "-c", command],
-            check=True,
-            text=True,
-            capture_output=True
-        )
-        logger.info("Successfully removed all existing routes.")
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to remove existing routes: {e.stderr}")
-    except Exception as e:
-        logger.error(f"Unexpected error while removing routes: {e}")
-
-
 # Анонсировать маршруты через BGP
 def announce_routes(ip_addresses, router_id):
     if not ip_addresses:
@@ -134,10 +113,6 @@ if __name__ == "__main__":
     # Получение параметров из конфигурации
     router_id = config["router"]["as_number"]
     youtube_as = config["router"]["youtube_as"]
-
-    # Удаление текущих маршрутов
-    logger.info("Removing existing routes.")
-    remove_existing_routes(router_id)
 
     # Получение новых маршрутов
     logger.info("Fetching YouTube routes.")
