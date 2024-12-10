@@ -1,0 +1,5 @@
+router:
+  as_number: 65001
+  youtube_as: 15169
+  log_file: logs/youtube_routes.log
+
