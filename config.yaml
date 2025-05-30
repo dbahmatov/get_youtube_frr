@@ -1,9 +1,25 @@
 router:
   as_number: 65001
-  youtube_as: 36561
-  ggc_as_list:
-    - 15169
-    - 36040
-    - 43515
+  services:
+    youtube:
+      as_numbers:
+        - 36561  # Main YouTube AS
+        - 15169  # Google GGC
+        - 36040  # Google GGC
+        - 43515  # Google GGC
+    clode.ai:
+      as_numbers:
+        - 12345
+        - 67890
+        - 399358 
+    jetbrains:
+      as_numbers:
+        - 200019  # JetBrains AS
+    hashicorp:
+      as_numbers:
+        - 396982
+    # Example of how to add more services:
+    # facebook:
+    #     - 32934
+    #     - 54115
   log_file: "logs/routes.log"
-
