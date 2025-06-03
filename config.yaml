@@ -9,8 +9,6 @@ router:
         - 43515  # Google GGC
     clode.ai:
       as_numbers:
-        - 12345
-        - 67890
         - 399358 
     jetbrains:
       as_numbers:
