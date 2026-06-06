@@ -126,5 +126,5 @@ python3 youtube_asn_analyzer.py
 ### Тесты
 
 ```bash
-python3 -m unittest test_youtube_asn_analyzer.py -v
+python3 -m unittest tests.test_youtube_asn_analyzer -v
 ```
