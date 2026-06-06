@@ -18,7 +18,7 @@
 - Python-зависимости:
 
 ```bash
-python3 -m pip install pyyaml loguru
+python3 -m pip install pyyaml loguru requests
 ```
 
 ## Использование
@@ -92,3 +92,39 @@ router:
 - `permission denied` при `vtysh` — дайте пользователю доступ к FRR.
 - таймауты WHOIS — уменьшите `whois_concurrency`, увеличьте `fetch_retries` или `whois_timeout_sec`.
 - пустой результат — проверьте, что у указанных ASN есть `route:` записи в RADB.
+
+## YouTube ASN Analyzer
+
+Скрипт анализирует YouTube-стриминг-серверы: извлекает googlevideo-хосты, резолвит IP-адреса и определяет ASN через ipinfo.io.
+
+### Требования
+
+- Python 3.9+
+- `requests`
+
+```bash
+python3 -m pip install requests
+```
+
+### Использование
+
+Интерактивный режим:
+
+```bash
+python3 youtube_asn_analyzer.py
+```
+
+Меню:
+
+1. Анализ sample-данных
+2. Вставить свой fetch() код
+3. Загрузить YouTube-видео и проанализировать хосты
+4. Проанализировать случайные видео через поиск
+
+Результаты сохраняются в JSON по запросу.
+
+### Тесты
+
+```bash
+python3 -m unittest test_youtube_asn_analyzer.py -v
+```
