@@ -1,1 +1,8 @@
 __pycache__/
+
+.DS_Store
+youtube_asn_results.json
+state/
+logs/
+routes*.log
+.pytest_cache/

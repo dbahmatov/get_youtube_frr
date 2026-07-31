@@ -1,0 +1,11 @@
+[Unit]
+Description=Run bgpfeed test full cycle daily
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+Persistent=true
+RandomizedDelaySec=10m
+Unit=bgpfeed-test-run.service
+
+[Install]
+WantedBy=timers.target

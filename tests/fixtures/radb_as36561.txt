@@ -1,0 +1,18 @@
+route:          165.85.150.0/24
+origin:         AS36561
+descr:          Google
+notify:         radb-contact@google.com
+mnt-by:         MAINT-AS15169
+changed:        noc@google.com 20241106 # 21:40 GMT
+source:         RADB
+last-modified:  2024-11-06T21:40:25Z
+rpki-ov-state:  valid
+
+route:          165.85.150.0/24
+descr:          RPKI ROA for 165.85.150.0/24 / AS36561
+remarks:        This AS36561 route object represents routing data retrieved
+                from the RPKI. This route object is the result of an automated
+                RPKI-to-IRR conversion process performed by IRRd.
+max-length:     24
+origin:         AS36561
+source:         RPKI  # Trust Anchor: arin

@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic refresh of service routes with bgpfeed
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=6h
+RandomizedDelaySec=30s
+Persistent=true
+Unit=bgpfeed.service
+
+[Install]
+WantedBy=timers.target

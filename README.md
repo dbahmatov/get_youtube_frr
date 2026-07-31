@@ -1,130 +1,156 @@
-# BGP Route Fetcher
+# bgpfeed
 
-Утилита получает IPv4-маршруты из RADB WHOIS по списку origin AS, суммаризирует их и анонсирует в FRRouting через `vtysh`.
+`bgpfeed` определяет ASN сервиса по доменам с нужной точки наблюдения,
+получает префиксы из RADB и анонсирует их во FRRouting. Механизм не содержит
+правил для конкретного сервиса: все домены, категории и политики задаются в
+YAML.
 
-## Возможности
-
-- параллельный запрос маршрутов из `whois.radb.net`;
-- фильтрация только IPv4-сетей с валидацией;
-- автоматическая суммаризация маршрутов;
-- анонс сетей в FRR батчами;
-- отзыв устаревших маршрутов через `--withdraw`.
+Новый пакет развёртывается отдельно. Легаси-скрипты `getroutes.py`,
+`getroutes_nosum.py` и `youtube_asn_analyzer.py` не изменены, не заменены и
+продолжают работать прежним способом.
 
 ## Требования
 
 - Python 3.9+
-- `whois`
-- `vtysh` из FRRouting
-- Python-зависимости:
+- `whois` для запросов к RADB
+- `vtysh` из FRRouting для применения маршрутов
+- Python-пакеты `pyyaml`, `loguru`, `dnspython`
 
 ```bash
-python3 -m pip install pyyaml loguru requests
+python3 -m pip install pyyaml loguru dnspython
 ```
 
-## Использование
+## Быстрый старт
 
-Создайте `config.yaml` и при необходимости отредактируйте его.
-
-Безопасная проверка (без вызова `vtysh`):
+Сначала обновить закреплённые фиды и проверить кэш:
 
 ```bash
-python3 getroutes.py --dry-run
+python3 -m bgpfeed feeds update --config config-v2.yaml
+python3 -m bgpfeed feeds show --config config-v2.yaml
+python3 -m bgpfeed feeds show --category youtube --config config-v2.yaml
 ```
 
-Обычный запуск:
+Выполнить обнаружение без обращения к FRR:
 
 ```bash
-python3 getroutes.py
+python3 -m bgpfeed discover --service youtube --config config-v2.yaml
+python3 -m bgpfeed show asns --service youtube --config config-v2.yaml
+python3 -m bgpfeed show prefixes --service youtube --config config-v2.yaml
 ```
 
-С альтернативным конфигом:
+Проверить полный цикл без изменения FRR, затем применить его:
 
 ```bash
-python3 getroutes.py --config /path/to/config.yaml
+python3 -m bgpfeed run --dry-run --config config-v2.yaml
+python3 -m bgpfeed run --config config-v2.yaml
 ```
 
-Без суммаризации:
+Синхронизировать FRR: добавить отсутствующие и удалить `network`, которых нет
+в текущем импорте:
 
 ```bash
-python3 getroutes.py -nosum
+python3 -m bgpfeed run --withdraw --dry-run --config config-v2.yaml
+python3 -m bgpfeed run --withdraw --config config-v2.yaml
 ```
 
-Отзыв устаревших маршрутов:
+`discover` и `show` никогда не вызывают `vtysh`. `run --dry-run --withdraw`
+читает текущую конфигурацию FRR и печатает точный diff, но не меняет её.
+Пустой результат discovery всегда завершает команду ошибкой до обращения к
+FRR, поэтому сбой DNS/RADB не может удалить все маршруты.
 
-```bash
-python3 getroutes.py --withdraw
-```
+## Конфигурация v2
 
-## Конфигурация
-
-Пример `config.yaml`:
+Минимальный сервис может состоять из одной geosite-категории:
 
 ```yaml
+version: 2
+
 router:
   as_number: 65001
-  log_file: "logs/routes.log"
-  services:
-    youtube:
-      as_numbers:
-        - 36561
-        - 15169
+  log_file: logs/bgpfeed.log
+  state_file: state/bgpfeed.json
+
+feeds:
+  cache_dir: state/feeds
+  refresh_days: 7
+  offline_ok: true
+  geosite:
+    url: https://raw.githubusercontent.com/v2fly/domain-list-community/{ref}/data/{category}
+    ref: "20260730073441"
+  geoip:
+    url: https://raw.githubusercontent.com/Loyalsoldier/geoip/{ref}/text/{category}.txt
+    ref: d57a38b3e88abe4c93a50a2eb5d55f59fe7607aa
+
+defaults:
+  resolve:
+    vantage:
+      source_ip: 192.0.2.10
+      resolvers: [system]
+
+services:
+  youtube:
+    geosite:
+      categories: [youtube]
+    geoip:
+      categories: [google]
+      mode: announce
 ```
 
-### Параметры `router`
+`ref` обязан быть тегом или commit SHA; плавающие ветки `main`/`master`
+отклоняются. При `offline_ok: true` недоступный источник заменяется последней
+целой копией из кэша. Оборванная загрузка и неверный `sha256` не перезаписывают
+кэш.
 
-- `as_number` — локальный BGP AS для `router bgp`
-- `log_file` — путь к файлу лога
-- `services` — набор сервисов и списков `as_numbers`
+Старый `config.yaml` без `version` по-прежнему поддерживается: перечисленные
+`as_numbers` разворачиваются из RADB без доменного discovery.
 
-Каждый сервис описывается именем и непустым списком ASN. Имя используется только для логов.
+## Vantage Point И GGC
 
-## Эксплуатационные замечания
+DNS-запросы привязываются к `resolve.vantage.source_ip`. Это принципиально для
+CDN: один домен с домашней машины и с маршрутизирующего VDS может вернуть
+разные edge-адреса. Локальный GGC обнаружится только если выбранный резолвер
+с этой точки действительно отдаёт адрес провайдерского кэша.
 
-- Перед реальным запуском рекомендуется использовать `--dry-run`.
-- Один и тот же ASN может встречаться в нескольких сервисах; маршруты дедуплицируются.
-- При `--withdraw` скрипт удаляет из FRR анонсы, которых больше нет в RADB.
-- Скрипт работает только с IPv4-маршрутами.
+На vds-kg провайдерского рекурсивного DNS нет, поэтому Google Public DNS
+возвращает AS15169, а не локальный GGC. Это ограничение сети, не фильтр в
+коде. `geoip:google` дополнительно покрывает известные Google/GGC-префиксы,
+но не заменяет vantage-резолв.
 
-## Типовые проблемы
+Живая проверка также показала, что AS36561, подписанная в старом конфиге как
+основная YouTube ASN, даёт из RADB только один маршрут. Реальное покрытие на
+vds-kg дал AS15169: 104 маршрута после точного схлопывания. Команда
+`show asns` выводит эту цену и причину решения для каждой ASN.
 
-- `Required command 'whois' is not available in PATH` — установите WHOIS-клиент.
-- `Required command 'vtysh' is not available in PATH` — установите FRRouting.
-- `permission denied` при `vtysh` — дайте пользователю доступ к FRR.
-- таймауты WHOIS — уменьшите `whois_concurrency`, увеличьте `fetch_retries` или `whois_timeout_sec`.
-- пустой результат — проверьте, что у указанных ASN есть `route:` записи в RADB.
+## Безопасность И Бюджет
 
-## YouTube ASN Analyzer
+- Суммаризация только точная: `ipaddress.collapse_addresses` не добавляет
+  адресное пространство, которого не было в источниках.
+- Bogon, private-сети и слишком широкие префиксы отбрасываются guard-ами.
+- Выделенные и ручные ASN анонсируются полностью после точного схлопывания.
+  Общие cloud/CDN ASN можно явно перевести в `strategy: covering_prefix`,
+  сохранив покрытие наблюдаемых и ещё живых state-адресов без всей AWS/Akamai.
+- Превышение бюджета журналируется, но не урезает ASN или geoip-категории.
+- Перед FRR выполняется финальное точное схлопывание объединённого набора всех
+  сервисов.
+- Ошибка внешнего источника не превращается в пустой успешный результат.
 
-Скрипт анализирует YouTube-стриминг-серверы: извлекает googlevideo-хосты, резолвит IP-адреса и определяет ASN через ipinfo.io.
+## Эксплуатация
 
-### Требования
+Примеры systemd находятся в `contrib/`, порядок отдельной установки и отката
+описан в `docs/deploy.md`. Юнит обнаружения запускается почасово, полный
+`run` раз в сутки. Перед включением таймера обязательно выполнить `run
+--dry-run` и сравнить результат с текущими маршрутами.
 
-- Python 3.9+
-- `requests`
+Production на vds-kg установлен в `/opt/bgpfeed` и запускается
+`bgpfeed.timer` каждые 6 часов. Старый `/opt/get_youtube_frr` сохранён для
+отката, его timer отключён.
+
+Та же схема включена на vds-se2: локальный AS65001, сервисы старого конфига и
+domain/geoip discovery для YouTube, Instagram, Anthropic, OpenAI и Telegram.
+Legacy-каталог сохранён, timer отключён.
+
+## Тесты
 
 ```bash
-python3 -m pip install requests
-```
-
-### Использование
-
-Интерактивный режим:
-
-```bash
-python3 youtube_asn_analyzer.py
-```
-
-Меню:
-
-1. Анализ sample-данных
-2. Вставить свой fetch() код
-3. Загрузить YouTube-видео и проанализировать хосты
-4. Проанализировать случайные видео через поиск
-
-Результаты сохраняются в JSON по запросу.
-
-### Тесты
-
-```bash
-python3 -m unittest tests.test_youtube_asn_analyzer -v
+python3 -m pytest tests/ -q
 ```

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run bgpfeed test discovery hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=5m
+Unit=bgpfeed-test-discover.service
+
+[Install]
+WantedBy=timers.target

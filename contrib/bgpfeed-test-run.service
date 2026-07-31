@@ -1,0 +1,10 @@
+[Unit]
+Description=bgpfeed test full run (updates FRR)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/bgpfeed-test
+Environment=PYTHONPATH=/opt/bgpfeed-test
+ExecStart=/opt/bgpfeed-test/venv/bin/python -m bgpfeed run --withdraw --config /opt/bgpfeed-test/config-v2-final.yaml

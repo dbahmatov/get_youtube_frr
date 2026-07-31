@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh service routes in FRR with bgpfeed
+After=network-online.target frr.service
+Wants=network-online.target
+Requires=frr.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/bgpfeed
+Environment=PYTHONPATH=/opt/bgpfeed
+ExecStart=/opt/bgpfeed/venv/bin/python -m bgpfeed run --withdraw --config /opt/bgpfeed/config.yaml
+Nice=10
