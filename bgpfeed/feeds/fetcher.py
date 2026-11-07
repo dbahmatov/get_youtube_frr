@@ -73,19 +73,20 @@ def fetch_category(
     warn = _warner(on_warning)
 
     path = cache_path(source, category, feeds)
+    expected = _expected_hash(source, category)
     if not force_refresh and _is_fresh(path, feeds.refresh_days, now):
-        cached = _read_cache(path)
+        cached = _read_cache(path, expected)
         if cached is not None:
             logger.debug("feeds: {} — using cache {}", category, path)
             return cached
 
     url = build_url(source, category)
     try:
-        body = _fetch_and_verify(url, source, opener, warn)
-    except FetchError:
-        cached = _read_cache(path) if feeds.offline_ok else None
+        body = _fetch_and_verify(url, source, category, opener, warn)
+    except FetchError as exc:
+        cached = _read_cache(path, expected) if feeds.offline_ok else None
         if cached is None:
-            raise
+            raise FetchError(f"{exc}; no verified cached copy available") from exc
         warn(f"feeds: {category} — source unavailable, falling back to cached copy")
         return cached
 
@@ -106,15 +107,24 @@ def cached_category_info(
         modified = os.path.getmtime(path)
     except OSError:
         return None
-    body = _read_cache(path)
+    body = _read_cache(path, _expected_hash(source, category))
     if body is None:
         return None
     current = time.time() if now is None else now
     return max(0.0, current - modified), body
 
 
-def _fetch_and_verify(url: str, source: FeedSource, opener: Opener,
-                      warn: Callable[[str], None]) -> str:
+def _expected_hash(source: FeedSource, category: str) -> Optional[str]:
+    hashes = source.sha256
+    if not hashes:
+        return None
+    if isinstance(hashes, str):  # прямой вызов со старым скалярным значением
+        return hashes
+    return hashes.get(category) or hashes.get("*")
+
+
+def _fetch_and_verify(url: str, source: FeedSource, category: str,
+                      opener: Opener, warn: Callable[[str], None]) -> str:
     """Качает ресурс и проверяет, что получен он целиком и тот самый."""
     try:
         raw, expected_length = opener(url, TIMEOUT_SEC)
@@ -132,13 +142,17 @@ def _fetch_and_verify(url: str, source: FeedSource, opener: Opener,
         raise FetchError(f"empty response from {url} — treating as a source failure")
 
     digest = hashlib.sha256(raw).hexdigest()
-    if source.sha256:
-        if digest != source.sha256:
+    expected = _expected_hash(source, category)
+    if expected:
+        if digest != expected:
             raise FetchError(
-                f"sha256 mismatch for {url}: expected {source.sha256}, got {digest}"
+                f"sha256 mismatch for {url}: expected {expected}, got {digest}"
             )
     else:
-        warn(f"feeds: {url} is unpinned by hash; add sha256: {digest} to the config")
+        warn(
+            f"feeds: {url} is unpinned by hash; add sha256: "
+            f"{{ {category}: {digest} }} to the config"
+        )
 
     return raw.decode("utf-8", errors="replace")
 
@@ -174,16 +188,21 @@ def _is_fresh(path: str, refresh_days: int, now: float) -> bool:
     return age < refresh_days * 86400
 
 
-def _read_cache(path: str) -> Optional[str]:
+def _read_cache(path: str, expected: Optional[str] = None) -> Optional[str]:
     try:
         with open(path, "r", encoding="utf-8") as handle:
-            return handle.read()
+            body = handle.read()
     except FileNotFoundError:
         # Первая загрузка категории — обычное дело, шуметь не о чем.
         return None
     except OSError as exc:
         logger.warning("feeds: cannot read cache {}: {}", path, exc)
         return None
+
+    if expected and hashlib.sha256(body.encode()).hexdigest() != expected:
+        logger.warning("feeds: cached copy {} failed sha256 check", path)
+        return None
+    return body
 
 
 def _write_cache(path: str, body: str, warn: Callable[[str], None]) -> None:

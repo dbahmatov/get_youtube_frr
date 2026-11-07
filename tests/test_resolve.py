@@ -187,6 +187,14 @@ def test_single_round_by_default(fake_dns):
     assert total == 1
 
 
+def test_resolver_is_reused_within_a_round(fake_dns):
+    resolve.resolve_hostnames(
+        ["a.com", "b.com", "c.com"],
+        cfg(record_types=("A",), rounds=2, round_delay_sec=0),
+    )
+    assert len(fake_dns.instances) == 2
+
+
 # --- устойчивость к сбоям ---
 
 def test_nxdomain_does_not_abort_run(fake_dns):
@@ -222,14 +230,6 @@ def test_total_failure_is_visible_not_silent(fake_dns):
     result = resolve.resolve_hostnames(["a.com", "b.com"], cfg(record_types=("A",)))
     assert result.addresses == set()
     assert len(result.failed) == 2
-    assert result.all_failed is True
-
-
-def test_partial_success_is_not_all_failed(fake_dns):
-    fake_dns.raises["dead.com"] = dns.exception.Timeout()
-    fake_dns.answers[("alive.com", "A")] = ["1.1.1.1"]
-    result = resolve.resolve_hostnames(["dead.com", "alive.com"], cfg(record_types=("A",)))
-    assert result.all_failed is False
 
 
 def test_no_answer_is_not_a_failure(fake_dns):

@@ -101,7 +101,10 @@ def lookup(
     records: Dict[str, AsnRecord] = {}
     for start in range(0, len(addresses), batch_size):
         batch = addresses[start:start + batch_size]
-        records.update(parse_bulk_response(_query(batch, host, port, timeout_sec)))
+        parsed = parse_bulk_response(_query(batch, host, port, timeout_sec))
+        if not parsed:
+            raise FetchError(f"cymru returned no records for a batch of {len(batch)}")
+        records.update(parsed)
 
     missing = [ip for ip in addresses if ip not in records]
     for ip in missing:

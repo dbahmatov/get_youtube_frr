@@ -18,9 +18,10 @@
 
 from __future__ import annotations
 
+import math
 import os
-from dataclasses import dataclass, replace
-from typing import Any, Dict, Literal, Optional, Tuple
+from dataclasses import dataclass, field, replace
+from typing import Any, Dict, Literal, Mapping, Optional, Tuple
 
 import yaml
 
@@ -28,8 +29,6 @@ from .errors import ConfigError
 
 Strategy = Literal["hybrid", "asn", "covering_prefix"]
 GeoipMode = Literal["announce", "corroborate", "off"]
-Corroboration = Literal["off", "soft", "strict"]
-OnOverflow = Literal["downgrade", "fail"]
 
 ASN_MAX = 4294967295
 
@@ -66,10 +65,8 @@ class ResolveConfig:
 @dataclass(frozen=True)
 class AsnPolicy:
     min_ips: int = 1
-    trusted_max_prefixes: int = 2000
     exclude_asns: Tuple[int, ...] = ()
     trusted_asns: Tuple[int, ...] = ()
-    corroboration: Corroboration = "soft"
 
 
 @dataclass(frozen=True)
@@ -82,14 +79,12 @@ class StatePolicy:
 class Guards:
     min_prefix_len: int = 10
     drop_bogons: bool = True
-    max_change_ratio: Optional[float] = None
+    max_change_ratio: Optional[float] = 0.5
 
 
 @dataclass(frozen=True)
 class Budget:
     max_total_prefixes: int = 20000
-    per_service_max: Optional[int] = None
-    on_overflow: OnOverflow = "downgrade"
 
 
 @dataclass(frozen=True)
@@ -121,7 +116,9 @@ class Wildcard:
 class FeedSource:
     url: str
     ref: str
-    sha256: Optional[str] = None
+    # Хэш относится к содержимому конкретной категории; "*" — legacy-пин
+    # на все категории шаблона.
+    sha256: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -196,6 +193,40 @@ def _parse_asn_list(value: Any, field: str) -> Tuple[int, ...]:
     return tuple(_parse_asn(item, field) for item in _as_tuple(value, field))
 
 
+def _parse_int_setting(
+    value: Any, field: str, default: Optional[int], minimum: int = 0,
+    maximum: Optional[int] = None,
+) -> Optional[int]:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"field {field!r} must be an integer, got {type(value).__name__}")
+    if value < minimum or (maximum is not None and value > maximum):
+        limit = f"{minimum}..{maximum}" if maximum is not None else f">= {minimum}"
+        raise ConfigError(f"field {field!r} must be in range {limit}, got {value!r}")
+    return value
+
+
+def _parse_float_setting(
+    value: Any, field: str, default: Optional[float], minimum: float = 0.0,
+    maximum: Optional[float] = None, exclusive_min: bool = False,
+) -> Optional[float]:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"field {field!r} must be a number, got {type(value).__name__}")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ConfigError(f"field {field!r} must be finite, got {value!r}")
+    below = number <= minimum if exclusive_min else number < minimum
+    if below or (maximum is not None and number > maximum):
+        limit = f"{'above' if exclusive_min else '>='} {minimum}"
+        if maximum is not None:
+            limit += f"..{maximum}"
+        raise ConfigError(f"field {field!r} must be {limit}, got {value!r}")
+    return number
+
+
 def _parse_choice(value: Any, allowed: Tuple[str, ...], field: str, default: str) -> str:
     if value is None:
         return default
@@ -223,7 +254,14 @@ def _parse_feed_source(raw: Any, name: str) -> Optional[FeedSource]:
             f"feeds.{name}.ref {ref!r} is a floating branch; "
             "pin to a release tag or commit sha so announcements stay reproducible"
         )
-    return FeedSource(url=str(url), ref=str(ref), sha256=data.get("sha256"))
+    hashes = data.get("sha256")
+    if isinstance(hashes, str):
+        hashes = {"*": hashes}
+    hashes = _require_mapping(hashes, f"feeds.{name}.sha256")
+    return FeedSource(
+        url=str(url), ref=str(ref),
+        sha256={str(key): str(value) for key, value in hashes.items()},
+    )
 
 
 def _parse_feeds(raw: Any) -> FeedsConfig:
@@ -231,7 +269,9 @@ def _parse_feeds(raw: Any) -> FeedsConfig:
     base = FeedsConfig()
     return FeedsConfig(
         cache_dir=data.get("cache_dir", base.cache_dir),
-        refresh_days=data.get("refresh_days", base.refresh_days),
+        refresh_days=_parse_int_setting(
+            data.get("refresh_days"), "feeds.refresh_days", base.refresh_days, minimum=0,
+        ),
         offline_ok=data.get("offline_ok", base.offline_ok),
         geosite=_parse_feed_source(data.get("geosite"), "geosite"),
         geoip=_parse_feed_source(data.get("geoip"), "geoip"),
@@ -243,9 +283,14 @@ def _parse_vantage(raw: Any, base: Vantage) -> Vantage:
     if not data:
         return base
     resolvers = data.get("resolvers")
+    interface = data.get("interface", base.interface)
+    if interface is not None:
+        raise ConfigError(
+            "resolve.vantage.interface is not implemented; use source_ip instead"
+        )
     return Vantage(
         source_ip=data.get("source_ip", base.source_ip),
-        interface=data.get("interface", base.interface),
+        interface=interface,
         resolvers=tuple(str(r) for r in _as_tuple(resolvers, "resolvers")) or base.resolvers,
     )
 
@@ -258,10 +303,20 @@ def _parse_resolve(raw: Any, base: ResolveConfig) -> ResolveConfig:
     return ResolveConfig(
         vantage=_parse_vantage(data.get("vantage"), base.vantage),
         record_types=tuple(str(t).upper() for t in record_types) or base.record_types,
-        rounds=data.get("rounds", base.rounds),
-        round_delay_sec=data.get("round_delay_sec", base.round_delay_sec),
-        concurrency=data.get("concurrency", base.concurrency),
-        timeout_sec=data.get("timeout_sec", base.timeout_sec),
+        rounds=_parse_int_setting(
+            data.get("rounds"), "resolve.rounds", base.rounds, minimum=1,
+        ),
+        round_delay_sec=_parse_float_setting(
+            data.get("round_delay_sec"), "resolve.round_delay_sec",
+            base.round_delay_sec, minimum=0.0,
+        ),
+        concurrency=_parse_int_setting(
+            data.get("concurrency"), "resolve.concurrency", base.concurrency, minimum=1,
+        ),
+        timeout_sec=_parse_float_setting(
+            data.get("timeout_sec"), "resolve.timeout_sec", base.timeout_sec,
+            minimum=0.0, exclusive_min=True,
+        ),
         follow_cname=data.get("follow_cname", base.follow_cname),
     )
 
@@ -271,16 +326,13 @@ def _parse_asn_policy(raw: Any, base: AsnPolicy, field: str) -> AsnPolicy:
     if not data:
         return base
     return AsnPolicy(
-        min_ips=data.get("min_ips", base.min_ips),
-        trusted_max_prefixes=data.get("trusted_max_prefixes", base.trusted_max_prefixes),
+        min_ips=_parse_int_setting(
+            data.get("min_ips"), f"{field}.min_ips", base.min_ips, minimum=0,
+        ),
         exclude_asns=_parse_asn_list(data.get("exclude_asns"), f"{field}.exclude_asns")
         or base.exclude_asns,
         trusted_asns=_parse_asn_list(data.get("trusted_asns"), f"{field}.trusted_asns")
         or base.trusted_asns,
-        corroboration=_parse_choice(
-            data.get("corroboration"), ("off", "soft", "strict"),
-            f"{field}.corroboration", base.corroboration,
-        ),
     )
 
 
@@ -289,7 +341,9 @@ def _parse_state_policy(raw: Any, base: StatePolicy) -> StatePolicy:
     if not data:
         return base
     return StatePolicy(
-        ttl_days=data.get("ttl_days", base.ttl_days),
+        ttl_days=_parse_int_setting(
+            data.get("ttl_days"), "state.ttl_days", base.ttl_days, minimum=0,
+        ),
         keep_manual_forever=data.get("keep_manual_forever", base.keep_manual_forever),
     )
 
@@ -298,9 +352,15 @@ def _parse_guards(raw: Any) -> Guards:
     data = _require_mapping(raw, "guards")
     base = Guards()
     return Guards(
-        min_prefix_len=data.get("min_prefix_len", base.min_prefix_len),
+        min_prefix_len=_parse_int_setting(
+            data.get("min_prefix_len"), "guards.min_prefix_len",
+            base.min_prefix_len, minimum=0, maximum=128,
+        ),
         drop_bogons=data.get("drop_bogons", base.drop_bogons),
-        max_change_ratio=data.get("max_change_ratio", base.max_change_ratio),
+        max_change_ratio=_parse_float_setting(
+            data.get("max_change_ratio"), "guards.max_change_ratio",
+            base.max_change_ratio, minimum=0.0, maximum=1.0,
+        ),
     )
 
 
@@ -308,11 +368,9 @@ def _parse_budget(raw: Any) -> Budget:
     data = _require_mapping(raw, "budget")
     base = Budget()
     return Budget(
-        max_total_prefixes=data.get("max_total_prefixes", base.max_total_prefixes),
-        per_service_max=data.get("per_service_max", base.per_service_max),
-        on_overflow=_parse_choice(
-            data.get("on_overflow"), ("downgrade", "fail"), "budget.on_overflow",
-            base.on_overflow,
+        max_total_prefixes=_parse_int_setting(
+            data.get("max_total_prefixes"), "budget.max_total_prefixes",
+            base.max_total_prefixes, minimum=0,
         ),
     )
 

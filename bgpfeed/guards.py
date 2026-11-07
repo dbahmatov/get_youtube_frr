@@ -9,13 +9,13 @@ Guards не пытаются улучшить покрытие — они не �
 from __future__ import annotations
 
 import ipaddress
-from typing import Iterable, List, Optional, Sequence, Union
+from typing import Iterable, List, Optional, Sequence
 
 from loguru import logger
 
 from .config import Guards
 from .errors import BgpfeedError
-from .summarize import Network, sort_key
+from .summarize import Network, sort_key, summarize
 
 # Адреса, которых не может быть в межсетевом анонсе: приватные, служебные,
 # документационные, мультикаст. Проверка идёт по вхождению, поэтому
@@ -84,6 +84,27 @@ def apply_guards(
 
     _check_change_ratio(kept, policy, previous)
     return kept
+
+
+def guard_and_summarize(
+    networks: Iterable[Network],
+    policy: Guards,
+    previous: Optional[Iterable[Network]] = None,
+) -> List[Network]:
+    """Фильтрует до склейки и сохраняет исходные части, если сумма стала шире."""
+    filtered = apply_guards(networks, policy)
+    result: List[Network] = []
+    for network in summarize(filtered):
+        if network.prefixlen >= policy.min_prefix_len:
+            result.append(network)
+        else:
+            result.extend(
+                source for source in filtered
+                if source.version == network.version and source.subnet_of(network)
+            )
+    result = sorted(set(result), key=sort_key)
+    _check_change_ratio(result, policy, previous)
+    return result
 
 
 def _check_change_ratio(

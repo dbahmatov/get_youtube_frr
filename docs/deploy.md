@@ -12,10 +12,40 @@
 - `bgpfeed.timer` — запуск каждые 6 часов;
 - `get-youtube-frr.timer` — disabled, но каталог и unit легаси сохранены.
 
-Проверка после переключения: 3215 configured IPv4 network, IPv6 — 0, обе
-BGP-сессии Established, повторный reconciliation — add=0/remove=0.
+С 31.07.2026 `geoip:google` работает в режиме `corroborate`, без прямого
+анонса всей категории. Проверка: 1042 configured IPv4 network, IPv6 — 0, обе
+BGP-сессии Established, повторный reconciliation — add=0/remove=0. Семь
+ручных ASN и все восемь известных GGC-префиксов сохранены.
 
-Production rollback одной командой:
+### vds-kg: обновление 08.11.2026
+
+Новая версия установлена в `/opt/bgpfeed`; существующие venv, systemd units
+и серверный `config.yaml` сохранены. Текущий конфиг использует восемь ручных
+ASN для YouTube, исключения AS396982/AS272082/AS9198 и не содержит
+geosite/geoip-категорий (отличается от исторической настройки 31.07 выше).
+
+Перед заменой сохранён полный архив установки, FRR-конфига и units:
+`/root/bgpfeed-production-backup-20261107T215516Z/bgpfeed-current.tar.gz`.
+SHA256: `0891286e8999dccc6ed0adb9e74bdbae2125133e09aad36bcb97478f6e6cdf79`.
+На время замены таймер остановлен, после проверки снова active/enabled.
+
+Проверки на vds-kg: 416 тестов прошли; два запуска штатного
+`bgpfeed.service` завершились успешно, оба дали
+`current=347 desired=347 add=0 remove=0`. Обе BGP-сессии Established,
+каждому соседу отправляется 348 префиксов, оба IPsec CHILD_SA установлены.
+FRR running-config и kernel routes не изменились. Добавление/удаление
+настоящих маршрутов не потребовалось; искусственный churn не создавался.
+Проверка с домашнего LAN-хоста не выполнена.
+
+При обновлении со старого state без поля `managed` сначала проверять
+`run --withdraw --dry-run` с отдельной копией state и перенаправленными
+путями log/cache: dry-run записывает discovery-state, хотя не меняет FRR.
+На vds-kg текущий и desired-наборы совпали, поэтому первый штатный запуск
+безопасно записал все 347 префиксов в `managed`; второй подтвердил
+идемпотентность. Если наборы различаются, не считать все текущие `network`
+управляемыми автоматически: сначала проверить принадлежность stale-маршрутов.
+
+Исторический rollback на legacy (не откат обновления от 08.11):
 
 ```bash
 systemctl disable --now bgpfeed.timer && systemctl enable --now get-youtube-frr.timer && systemctl start get-youtube-frr.service
@@ -100,10 +130,10 @@ systemctl daemon-reload
 systemctl enable --now bgpfeed-test-run.timer
 ```
 
-Проверенный на vds-kg `config-v2-final.yaml` объединяет `geosite:youtube`,
-`geoip:google` и семь ручных ASN, которые закрывают недоступные с этой точки
-GGC-диапазоны. Финальный живой план содержал 3215 IPv4-префиксов; IPv6 на
-границе FRR отфильтрован согласно scope v1.
+Проверенный на vds-kg конфиг объединяет `geosite:youtube`, семь ручных ASN и
+`geoip:google` в режиме `corroborate`. После отключения прямого анонса всей
+geoip-категории живой план содержит 1042 IPv4-префикса; IPv6 на границе FRR
+отфильтрован согласно scope v1.
 
 ## Откат
 

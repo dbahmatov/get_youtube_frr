@@ -49,20 +49,10 @@ def total_cost_all(
     return total_cost(verdicts) + sum(_feed_cost(feed) for feed in feeds)
 
 
-def fit_to_budget(
-    verdicts: Sequence[AsnVerdict],
-    budget: Budget,
-    manual_asns: Iterable[int],
-) -> List[AsnVerdict]:
-    result, _ = fit_all(verdicts, (), budget, manual_asns)
-    return result
-
-
 def fit_all(
     verdicts: Sequence[AsnVerdict],
     feeds: Sequence[FeedVerdict],
     budget: Budget,
-    manual_asns: Iterable[int],
 ) -> Tuple[List[AsnVerdict], List[FeedVerdict]]:
     """Возвращает полный набор; превышение бюджета только журналируется."""
     result = list(verdicts)

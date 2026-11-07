@@ -26,6 +26,7 @@ from typing import Dict, Iterable, Optional, Tuple
 from loguru import logger
 
 from .config import StatePolicy
+from .summarize import Network
 
 SCHEMA_VERSION = 1
 
@@ -43,6 +44,9 @@ class State:
         # ASN, заданные оператором руками. Хранятся отдельно от времени
         # встречи, потому что к ним TTL неприменим по смыслу.
         self._manual: Dict[str, set] = {}
+        # Network, которые выставил сам bgpfeed. Только их можно снимать:
+        # остальные могли настроить руками или оставить legacy-скрипт.
+        self._managed: set = set()
 
     # --- запись ---
 
@@ -72,6 +76,16 @@ class State:
             if manual:
                 self._manual.setdefault(service, set()).add(str(asn))
 
+    def sync_manual(self, service: str, asns: Iterable[int]) -> None:
+        """Оставляет в защищённом наборе только ASN из текущего конфига."""
+        self._manual[service] = {str(asn) for asn in asns}
+
+    def set_managed(self, networks: Iterable[Network]) -> None:
+        self._managed = {str(network) for network in networks}
+
+    def managed(self) -> Tuple[str, ...]:
+        return tuple(sorted(self._managed))
+
     def set_feed_ref(self, feed: str, ref: str) -> None:
         self._feeds[feed] = ref
 
@@ -99,28 +113,27 @@ class State:
 
     # --- протухание ---
 
-    def expire(self, policy: StatePolicy, now: Optional[float] = None) -> int:
-        """Выбрасывает наблюдения старше `ttl_days`. Возвращает число удалённых."""
+    def expire(
+        self, service: str, policy: StatePolicy, now: Optional[float] = None,
+    ) -> int:
+        """Выбрасывает старые наблюдения только указанного сервиса."""
         stamp = time.time() if now is None else now
         cutoff = stamp - policy.ttl_days * 86400
         removed = 0
 
-        for service, bucket in self._services.items():
-            protected = (
-                self._manual.get(service, set()) if policy.keep_manual_forever else set()
-            )
-            for kind, entries in bucket.items():
-                stale = [
-                    value for value, seen in entries.items()
-                    if seen < cutoff and not (kind == "asns" and value in protected)
-                ]
-                for value in stale:
-                    del entries[value]
-                removed += len(stale)
+        protected = self._manual.get(service, set()) if policy.keep_manual_forever else set()
+        for kind, entries in self._services.get(service, {}).items():
+            stale = [
+                value for value, seen in entries.items()
+                if seen < cutoff and not (kind == "asns" and value in protected)
+            ]
+            for value in stale:
+                del entries[value]
+            removed += len(stale)
 
         if removed:
-            logger.info("state: expired {} observation(s) older than {} days",
-                        removed, policy.ttl_days)
+            logger.info("state: {} expired {} observation(s) older than {} days",
+                        service, removed, policy.ttl_days)
         return removed
 
     # --- сериализация ---
@@ -131,6 +144,7 @@ class State:
             "services": self._services,
             "feeds": self._feeds,
             "manual": {s: sorted(v) for s, v in self._manual.items()},
+            "managed": sorted(self._managed),
         }
 
     @classmethod
@@ -140,6 +154,7 @@ class State:
             feeds=data.get("feeds") or {},
         )
         state._manual = {s: set(v) for s, v in (data.get("manual") or {}).items()}
+        state._managed = set(data.get("managed") or ())
         return state
 
 

@@ -46,17 +46,6 @@ class ResolveResult:
             result |= addresses
         return result
 
-    @property
-    def all_failed(self) -> bool:
-        """Ни одного ответа при непустом списке целей.
-
-        Отдельный флаг, а не проверка на пустоту: пустой результат из-за
-        сбоя и пустой результат из-за отсутствия целей требуют разной
-        реакции выше по конвейеру.
-        """
-        return bool(self.failed) and not self.addresses
-
-
 def build_targets(
     domains: Iterable[str],
     wildcards: Iterable[Wildcard],
@@ -115,9 +104,10 @@ def _resolve_round(
     result: ResolveResult,
 ) -> None:
     workers = max(1, min(config.concurrency, len(hostnames)))
+    resolver = _build_resolver(config)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for hostname, addresses, error in pool.map(
-            lambda name: _resolve_one(name, config), hostnames
+            lambda name: _resolve_one(name, config, resolver), hostnames
         ):
             if addresses:
                 result.by_hostname.setdefault(hostname, set()).update(addresses)
@@ -128,8 +118,9 @@ def _resolve_round(
                 result.failed[hostname] = error
 
 
-def _resolve_one(hostname: str, config: ResolveConfig) -> Tuple[str, Set[str], str]:
-    resolver = _build_resolver(config)
+def _resolve_one(
+    hostname: str, config: ResolveConfig, resolver: "dns.resolver.Resolver",
+) -> Tuple[str, Set[str], str]:
     source = config.vantage.source_ip
     addresses: Set[str] = set()
     error = ""

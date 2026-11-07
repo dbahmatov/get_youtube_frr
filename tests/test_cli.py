@@ -22,6 +22,7 @@ from bgpfeed import cli
 from bgpfeed.discover import ServiceReport
 from bgpfeed.errors import AnnouncementError, FetchError
 from bgpfeed.select import AsnVerdict
+from bgpfeed.state import State, load_state, save_state
 
 CONFIG = """
     router:
@@ -78,6 +79,12 @@ def feeds_config_path(tmp_path):
 
 def nets(*cidrs):
     return [ipaddress.ip_network(c) for c in cidrs]
+
+
+def seed_managed(tmp_path, *cidrs):
+    state = State()
+    state.set_managed(nets(*cidrs))
+    save_state(state, str(tmp_path / "state.json"))
 
 
 @pytest.fixture
@@ -214,6 +221,22 @@ def test_service_filter_limits_work(config_path, fake_pipeline, no_frr):
     assert calls == ["youtube"]
 
 
+def test_service_filter_with_withdraw_is_rejected_before_work(
+    config_path, fake_pipeline, no_frr, monkeypatch,
+):
+    """Один сервис не даёт права считать чужие network устаревшими."""
+    calls = fake_pipeline()
+    monkeypatch.setattr(
+        cli.frr, "get_configured_networks", lambda asn: nets("1.1.1.0/24"),
+    )
+
+    assert cli.main([
+        "run", "--config", config_path, "--service", "youtube", "--withdraw",
+    ]) != 0
+    assert calls == []
+    assert no_frr == {"announce": [], "withdraw": [], "current": []}
+
+
 def test_prefixes_merged_across_services(config_path, monkeypatch, no_frr):
     """Сервисы часто делят инфраструктуру — их блоки схлопываются вместе."""
     halves = iter([nets("8.8.8.0/25"), nets("8.8.8.128/25")])
@@ -257,7 +280,29 @@ def test_guards_applied_to_merged_result(config_path, monkeypatch, no_frr):
     assert seen == {}
 
 
-def test_withdraw_reconciles_current_networks(config_path, fake_pipeline, no_frr, monkeypatch):
+def test_merge_keeps_specific_parts_of_too_wide_collapse(
+    config_path, monkeypatch, no_frr,
+):
+    def fake(service, state, budget, guards, **kwargs):
+        return ServiceReport(
+            service=service.name,
+            prefixes=nets("8.0.0.0/10", "8.64.0.0/10"),
+        )
+
+    monkeypatch.setattr(cli.discover, "discover_service", fake)
+    seen = {}
+    monkeypatch.setattr(
+        cli.frr, "announce",
+        lambda asn, prefixes, **kw: seen.setdefault("p", list(prefixes)) or [],
+    )
+    assert cli.main(["run", "--config", config_path, "--dry-run"]) == 0
+    assert seen["p"] == nets("8.0.0.0/10", "8.64.0.0/10")
+
+
+def test_withdraw_reconciles_current_networks(
+    config_path, fake_pipeline, no_frr, monkeypatch, tmp_path,
+):
+    seed_managed(tmp_path, "1.1.1.0/24")
     fake_pipeline(prefixes=nets("8.8.8.0/24", "9.9.9.0/24"))
     monkeypatch.setattr(
         cli.frr, "get_configured_networks",
@@ -266,6 +311,52 @@ def test_withdraw_reconciles_current_networks(config_path, fake_pipeline, no_frr
     cli.main(["run", "--config", config_path, "--withdraw", "--dry-run"])
     assert no_frr["announce"][0]["prefixes"] == nets("9.9.9.0/24")
     assert no_frr["withdraw"][0]["prefixes"] == nets("1.1.1.0/24")
+
+
+def test_withdraw_never_removes_untracked_networks(
+    config_path, fake_pipeline, no_frr, monkeypatch, tmp_path,
+):
+    """Ручной или legacy network не принадлежит bgpfeed — только предупредить."""
+    fake_pipeline(prefixes=nets("8.8.8.0/24"))
+    monkeypatch.setattr(
+        cli.frr, "get_configured_networks",
+        lambda asn: nets("8.8.8.0/24", "1.1.1.0/24", "2001:4860::/32"),
+    )
+    warnings = []
+    monkeypatch.setattr(
+        cli.logger, "warning",
+        lambda message, *args: warnings.append(message.format(*args)),
+    )
+
+    assert cli.main(["run", "--config", config_path, "--withdraw"]) == 0
+    assert no_frr["withdraw"] == []
+    assert any("1.1.1.0/24" in message for message in warnings)
+    assert any("2001:4860::/32" in message for message in warnings)
+
+
+def test_run_tracks_announced_prefixes_as_managed(
+    config_path, fake_pipeline, no_frr, tmp_path,
+):
+    fake_pipeline(prefixes=nets("8.8.8.0/24"))
+    assert cli.main(["run", "--config", config_path]) == 0
+    assert load_state(str(tmp_path / "state.json")).managed() == ("8.8.8.0/24",)
+
+
+def test_withdraw_refuses_sudden_shrink_with_default_guard(
+    config_path, fake_pipeline, no_frr, monkeypatch, tmp_path,
+):
+    """Переход 4 → 1 похож на частичный сбой, а не на повод снять маршруты."""
+    previous = nets("8.8.8.0/24", "8.8.4.0/24", "1.1.1.0/24", "1.0.0.0/24")
+    seed_managed(tmp_path, *(str(network) for network in previous))
+    fake_pipeline(prefixes=nets("8.8.8.0/24"))
+    monkeypatch.setattr(
+        cli.frr, "get_configured_networks",
+        lambda asn: previous,
+    )
+
+    assert cli.main(["run", "--config", config_path, "--withdraw"]) != 0
+    assert no_frr["announce"] == []
+    assert no_frr["withdraw"] == []
 
 
 def test_reconciliation_add_failure_prevents_withdraw(
@@ -284,8 +375,9 @@ def test_reconciliation_add_failure_prevents_withdraw(
 
 
 def test_reconciliation_adds_before_removing(
-    config_path, fake_pipeline, monkeypatch,
+    config_path, fake_pipeline, monkeypatch, tmp_path,
 ):
+    seed_managed(tmp_path, "1.1.1.0/24")
     fake_pipeline(prefixes=nets("8.8.8.0/24"))
     events = []
     monkeypatch.setattr(cli.frr, "get_configured_networks",
@@ -386,6 +478,19 @@ def test_bad_config_exits_nonzero(tmp_path):
     assert cli.main(["run", "--config", str(tmp_path / "nope.yaml")]) != 0
 
 
+def test_collect_drops_manual_asn_removed_from_config(
+    config_path, fake_pipeline, tmp_path,
+):
+    state = State()
+    state.observe("youtube", asns=[99999], manual=True, now=0)
+    save_state(state, str(tmp_path / "state.json"))
+    fake_pipeline()
+
+    cli.collect(cli.load_config(config_path), None)
+
+    assert 99999 not in load_state(str(tmp_path / "state.json")).asns("youtube")
+
+
 def test_state_is_persisted_between_runs(config_path, monkeypatch, no_frr, tmp_path):
     """Накопленное за прогон должно пережить его завершение."""
     def fake(service, state, budget, guards, **kwargs):
@@ -395,7 +500,6 @@ def test_state_is_persisted_between_runs(config_path, monkeypatch, no_frr, tmp_p
     monkeypatch.setattr(cli.discover, "discover_service", fake)
     cli.main(["run", "--config", config_path, "--dry-run"])
 
-    from bgpfeed.state import load_state
     state = load_state(str(tmp_path / "state.json"))
     assert "rr1.googlevideo.com" in state.hostnames("youtube")
 
@@ -451,6 +555,18 @@ def test_feeds_update_caches_recursive_geosite_categories(feeds_config_path, mon
     monkeypatch.setattr(cli.feed_fetcher, "fetch_category", fake_fetch)
     assert cli.main(["feeds", "update", "--config", feeds_config_path]) == 0
     assert seen == ["youtube", "google-video", "google"]
+
+
+def test_feeds_update_fails_when_geosite_category_is_missing(
+    feeds_config_path, monkeypatch,
+):
+    def fake_fetch(source, category, feeds, **kwargs):
+        if category == "youtube":
+            raise FetchError("source down")
+        return "8.8.8.0/24\n"
+
+    monkeypatch.setattr(cli.feed_fetcher, "fetch_category", fake_fetch)
+    assert cli.main(["feeds", "update", "--config", feeds_config_path]) != 0
 
 
 def test_feeds_show_reports_ref_age_and_entry_count(feeds_config_path, monkeypatch, capsys):

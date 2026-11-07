@@ -26,7 +26,6 @@ from typing import Callable, Dict, List, Optional, Sequence, Set
 
 from loguru import logger
 
-from . import frr  # noqa: F401  (импорт держит модуль рядом для CLI)
 from . import irr, resolve
 from .asnmap import cymru
 from .asnmap.cymru import AsnRecord
@@ -35,10 +34,10 @@ from .config import Budget, Guards, Service
 from .errors import FetchError
 from .feeds import geoip as geoip_feed
 from .feeds import geosite as geosite_feed
-from .guards import apply_guards
+from .guards import guard_and_summarize
 from .select import AsnVerdict, classify_all
 from .state import State
-from .summarize import Network, prefix_count, summarize, sort_key
+from .summarize import Network
 
 
 @dataclass
@@ -82,6 +81,7 @@ def discover_service(
     fetch_fn = fetch_fn or irr.fetch_prefixes
 
     report = ServiceReport(service=service.name)
+    state.sync_manual(service.name, service.as_numbers)
 
     extra_targets = _geosite_targets(service, report, feeds_fn)
     records = _discover_addresses(service, state, report, resolve_fn, lookup_fn,
@@ -99,16 +99,17 @@ def discover_service(
         return report
 
     if observed:
+        current_asns = {r.asn for r in records.values() if r.asn is not None}
         state.observe(service.name, asns=service.as_numbers, manual=True)
-        state.observe(service.name,
-                      asns=[a for a in observed if a not in service.as_numbers])
+        state.observe(service.name, asns=current_asns - set(service.as_numbers))
 
-    irr_prefixes, costs = _measure_asns(observed, report, fetch_fn)
+    irr_prefixes, costs = _measure_asns(
+        observed, records, service, report, fetch_fn, guards,
+    )
     verdicts = classify_all(observed, costs, service.asn_policy,
                             corroborated_asns=report.corroborated_asns)
     verdicts = _apply_strategy(service, verdicts)
-    verdicts, feed_verdicts = fit_all(verdicts, feed_verdicts, budget,
-                                      manual_asns=service.as_numbers)
+    verdicts, feed_verdicts = fit_all(verdicts, feed_verdicts, budget)
     report.verdicts = verdicts
     report.feed_verdicts = feed_verdicts
 
@@ -117,7 +118,7 @@ def discover_service(
         if feed.mode == "announce":
             collected.extend(feed_prefixes.by_category.get(feed.category, []))
 
-    report.prefixes = apply_guards(summarize(collected), guards)
+    report.prefixes = guard_and_summarize(collected, guards)
     logger.info("{}: {} prefix(es) from {} ASN(s)",
                 service.name, len(report.prefixes), len(verdicts))
     return report
@@ -169,6 +170,10 @@ def _geoip_prefixes(
         max_total_prefixes=budget.max_total_prefixes,
     )
     report.missing_categories |= result.missing
+    if service.geoip.mode == "announce" and result.missing:
+        raise FetchError(
+            "geoip announce categories unavailable: " + ", ".join(sorted(result.missing))
+        )
     return result
 
 
@@ -253,8 +258,11 @@ def _group_by_asn(service: Service, records: Dict[str, AsnRecord]) -> Dict[int, 
 
 def _measure_asns(
     observed: Dict[int, Set[str]],
+    records: Dict[str, AsnRecord],
+    service: Service,
     report: ServiceReport,
     fetch_fn: Callable,
+    guards: Guards,
 ):
     """Узнаёт цену каждой ASN в маршрутах.
 
@@ -268,16 +276,45 @@ def _measure_asns(
     costs: Dict[int, float] = {}
 
     for asn in sorted(observed):
+        covering = _cymru_covering(service, asn, observed[asn], records)
+        if covering is not None:
+            costs[asn] = len(covering)
+            logger.debug("AS{}: Cymru covers every address; RADB skipped", asn)
+            continue
         try:
             fetched = fetch_fn(asn)
         except FetchError as exc:
             report.unreachable_asns[asn] = str(exc)
+            if not observed[asn]:
+                raise FetchError(
+                    f"AS{asn}: IRR unavailable and no addresses for fallback: {exc}"
+                ) from exc
             logger.warning("AS{}: no IRR data ({}) — covering prefixes only", asn, exc)
             continue
-        prefixes[asn] = summarize(fetched)
-        costs[asn] = prefix_count(fetched)
+        prefixes[asn] = guard_and_summarize(fetched, guards)
+        costs[asn] = len(prefixes[asn])
 
     return prefixes, costs
+
+
+def _cymru_covering(
+    service: Service,
+    asn: int,
+    addresses: Set[str],
+    records: Dict[str, AsnRecord],
+) -> Optional[Set[Network]]:
+    """Покрытие из Cymru, если RADB для limited-ASN заведомо не нужен."""
+    explicit = set(service.as_numbers) | set(service.asn_policy.trusted_asns)
+    if service.strategy != "covering_prefix" or asn in explicit or not addresses:
+        return None
+
+    covering = set()
+    for ip in addresses:
+        record = records.get(ip)
+        if record is None or record.prefix is None:
+            return None
+        covering.add(record.prefix)
+    return covering
 
 
 def _apply_strategy(service: Service, verdicts: Sequence[AsnVerdict]) -> List[AsnVerdict]:
@@ -287,8 +324,9 @@ def _apply_strategy(service: Service, verdicts: Sequence[AsnVerdict]) -> List[As
 
     from dataclasses import replace
 
+    explicit = set(service.as_numbers) | set(service.asn_policy.trusted_asns)
     return [
-        v if v.tier == "rejected"
+        v if v.tier == "rejected" or v.asn in explicit
         else replace(v, tier="limited", reason="strategy=covering_prefix")
         for v in verdicts
     ]

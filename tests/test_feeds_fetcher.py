@@ -233,6 +233,47 @@ def test_sha256_match_passes(feeds):
     assert fetch(feeds, FakeOpener(), source=source) == BODY
 
 
+def test_sha256_is_checked_per_category(feeds):
+    google = "google.example\n"
+    source = FeedSource(
+        url=SOURCE.url,
+        ref=SOURCE.ref,
+        sha256={"youtube": sha256(BODY), "google": sha256(google)},
+    )
+
+    assert fetch(feeds, FakeOpener(body=BODY), source=source) == BODY
+    with pytest.raises(FetchError, match="sha256"):
+        fetch(
+            feeds, FakeOpener(body="подмена\n"), source=source, category="google",
+        )
+
+
+def test_fresh_cache_is_verified_before_use(feeds):
+    fetch(feeds, FakeOpener())
+    source = FeedSource(url=SOURCE.url, ref=SOURCE.ref, sha256=sha256("другое"))
+
+    with pytest.raises(FetchError, match="sha256"):
+        fetch(feeds, FakeOpener(body=BODY), source=source)
+
+
+def test_offline_fallback_cache_is_verified(feeds):
+    fetch(feeds, FakeOpener())
+    path = fetcher.cache_path(SOURCE, "youtube", feeds)
+    old = time.time() - 90 * 86400
+    os.utime(path, (old, old))
+    source = FeedSource(url=SOURCE.url, ref=SOURCE.ref, sha256=sha256("другое"))
+
+    with pytest.raises(FetchError, match="cache"):
+        fetch(feeds, FakeOpener(error=OSError("down")), source=source)
+
+
+def test_cached_info_does_not_return_tampered_cache(feeds):
+    fetch(feeds, FakeOpener())
+    source = FeedSource(url=SOURCE.url, ref=SOURCE.ref, sha256=sha256("другое"))
+
+    assert fetcher.cached_category_info(source, "youtube", feeds) is None
+
+
 def test_sha256_mismatch_does_not_poison_cache(feeds):
     source = FeedSource(url=SOURCE.url, ref=SOURCE.ref, sha256=sha256("другое"))
     with pytest.raises(FetchError):

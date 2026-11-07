@@ -23,13 +23,13 @@ from loguru import logger
 
 from . import discover, frr
 from .config import Config, load_config
-from .errors import AnnouncementError, BgpfeedError
+from .errors import AnnouncementError, BgpfeedError, ConfigError, FetchError
 from .feeds import fetcher as feed_fetcher
 from .feeds import geoip as geoip_feed
 from .feeds import geosite as geosite_feed
-from .guards import apply_guards
+from .guards import guard_and_summarize
 from .state import load_state, save_state
-from .summarize import Network, summarize
+from .summarize import Network
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -94,7 +94,8 @@ def collect(config: Config, service_name: Optional[str]) -> List[discover.Servic
 
     reports = []
     for service in services:
-        state.expire(service.state_policy)
+        state.sync_manual(service.name, service.as_numbers)
+        state.expire(service.name, service.state_policy)
         reports.append(discover.discover_service(
             service, state=state, budget=config.budget, guards=config.guards,
             feeds_fn=feeds_fn,
@@ -126,7 +127,11 @@ def _configured_categories(config: Config) -> List[Tuple[str, str]]:
     return list(dict.fromkeys(result))
 
 
-def merge_prefixes(reports: Sequence[discover.ServiceReport], config: Config) -> List[Network]:
+def merge_prefixes(
+    reports: Sequence[discover.ServiceReport],
+    config: Config,
+    previous: Optional[Sequence[Network]] = None,
+) -> List[Network]:
     """Сводит префиксы всех сервисов в один набор.
 
     Схлопывание повторяется поверх объединения: сервисы часто делят
@@ -135,12 +140,23 @@ def merge_prefixes(reports: Sequence[discover.ServiceReport], config: Config) ->
     collected: List[Network] = []
     for report in reports:
         collected.extend(prefix for prefix in report.prefixes if prefix.version == 4)
-    return apply_guards(summarize(collected), config.guards)
+    return guard_and_summarize(collected, config.guards, previous=previous)
 
 
 def run_command(config: Config, args: argparse.Namespace) -> int:
+    if args.service and args.withdraw:
+        raise ConfigError("--service cannot be combined with --withdraw")
+
     reports = collect(config, args.service)
-    prefixes = merge_prefixes(reports, config)
+    state = load_state(config.state_file)
+    managed = set(state.managed())
+    current = None
+    if args.withdraw and any(
+        prefix.version == 4 for report in reports for prefix in report.prefixes
+    ):
+        current = frr.get_configured_networks(config.as_number)
+    previous = [n for n in current or () if str(n) in managed]
+    prefixes = merge_prefixes(reports, config, previous=previous)
     logger.info("total: {} prefix(es) across {} service(s)", len(prefixes), len(reports))
 
     if not prefixes:
@@ -149,13 +165,25 @@ def run_command(config: Config, args: argparse.Namespace) -> int:
         )
 
     if not args.withdraw:
-        _print_dry_run(frr.announce(
-            config.as_number, prefixes, dry_run=args.dry_run,
-        ), args.dry_run)
+        scripts = frr.announce(config.as_number, prefixes, dry_run=args.dry_run)
+        _print_dry_run(scripts, args.dry_run)
+        if not args.dry_run:
+            state.set_managed(managed | {str(p) for p in prefixes})
+            save_state(state, config.state_file)
         return EXIT_OK
 
-    current = frr.get_configured_networks(config.as_number)
+    assert current is not None  # Непустой withdraw уже прочитал текущий набор FRR.
     plan = frr.reconciliation_diff(current=current, desired=prefixes)
+    foreign = [n for n in plan.to_remove if str(n) not in managed]
+    if foreign:
+        logger.warning(
+            "frr: refusing to withdraw {} untracked network(s): {}",
+            len(foreign), ", ".join(str(n) for n in foreign[:5]),
+        )
+        plan = frr.ReconciliationPlan(
+            to_add=plan.to_add,
+            to_remove=[n for n in plan.to_remove if str(n) in managed],
+        )
     logger.info(
         "frr: reconciliation current={} desired={} add={} remove={}",
         len(current), len(prefixes), len(plan.to_add), len(plan.to_remove),
@@ -171,6 +199,9 @@ def run_command(config: Config, args: argparse.Namespace) -> int:
             config.as_number, plan.to_remove, dry_run=args.dry_run,
         )
         _print_dry_run(scripts, args.dry_run)
+    if not args.dry_run:
+        state.set_managed(prefixes)
+        save_state(state, config.state_file)
     return EXIT_OK
 
 
@@ -222,6 +253,11 @@ def feeds_command(config: Config, args: argparse.Namespace) -> int:
             )
             if kind == "geosite":
                 loaded = geosite_feed.load_category(category, loader)
+                if loaded.missing:
+                    raise FetchError(
+                        f"geosite:{category}: missing categories: "
+                        + ", ".join(sorted(loaded.missing))
+                    )
                 count = len(loaded.all_names)
             else:
                 count = _entry_count(kind, loader(category))

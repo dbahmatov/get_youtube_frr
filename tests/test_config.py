@@ -107,7 +107,7 @@ V2_CONFIG = """
     defaults:
       strategy: hybrid
       asn_selection:
-        trusted_max_prefixes: 2000
+        min_ips: 2
       budget:
         max_total_prefixes: 20000
     services:
@@ -125,7 +125,7 @@ V2_CONFIG = """
       jetbrains:
         domains: [jetbrains.com]
         asn_selection:
-          trusted_max_prefixes: 50
+          min_ips: 3
 """
 
 
@@ -147,7 +147,7 @@ def test_v2_wildcard_samples(tmp_path):
 
 def test_defaults_merge_into_services(tmp_path):
     cfg = load_config(write_config(tmp_path, V2_CONFIG))
-    assert cfg.service("youtube").asn_policy.trusted_max_prefixes == 2000
+    assert cfg.service("youtube").asn_policy.min_ips == 2
     assert cfg.service("youtube").strategy == "hybrid"
 
 
@@ -155,8 +155,8 @@ def test_service_overrides_defaults(tmp_path):
     """Настройка сервиса перекрывает defaults, не затирая остальные поля."""
     cfg = load_config(write_config(tmp_path, V2_CONFIG))
     jetbrains = cfg.service("jetbrains")
-    assert jetbrains.asn_policy.trusted_max_prefixes == 50
-    assert jetbrains.asn_policy.min_ips == 1  # дефолт уцелел
+    assert jetbrains.asn_policy.min_ips == 3
+    assert jetbrains.asn_policy.exclude_asns == ()  # дефолт уцелел
 
 
 def test_v2_manual_asns_still_trusted(tmp_path):
@@ -218,6 +218,41 @@ def test_invalid_asn_rejected(tmp_path, bad_asn):
               services:
                 youtube:
                   as_numbers: [{bad_asn!r}]
+        """))
+
+
+@pytest.mark.parametrize(("extra", "field"), [
+    ("budget:\n  max_total_prefixes: '20000'", "max_total_prefixes"),
+    ("guards:\n  max_change_ratio: 1.5", "max_change_ratio"),
+    ("defaults:\n  resolve:\n    round_delay_sec: -1", "round_delay_sec"),
+    ("defaults:\n  resolve:\n    rounds: '3'", "rounds"),
+])
+def test_invalid_numeric_setting_is_a_config_error(tmp_path, extra, field):
+    config = textwrap.dedent(f"""
+        version: 2
+        router:
+          as_number: 65001
+        services:
+          youtube:
+            domains: [youtube.com]
+    """).rstrip() + "\n" + extra + "\n"
+
+    with pytest.raises(ConfigError, match=field):
+        load_config(write_config(tmp_path, config))
+
+
+def test_vantage_interface_is_rejected_instead_of_ignored(tmp_path):
+    with pytest.raises(ConfigError, match="interface"):
+        load_config(write_config(tmp_path, """
+            version: 2
+            router:
+              as_number: 65001
+            services:
+              youtube:
+                domains: [youtube.com]
+                resolve:
+                  vantage:
+                    interface: eth0
         """))
 
 

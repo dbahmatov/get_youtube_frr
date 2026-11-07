@@ -159,6 +159,13 @@ def test_unanswered_ip_marked_none(fake_connect):
     assert result["9.9.9.9"].asn is None
 
 
+def test_empty_batch_response_is_a_failure(fake_connect):
+    """Пустой ответ сервера нельзя превращать в «все адреса ничьи»."""
+    fake_connect(response="")
+    with pytest.raises(FetchError, match="cymru"):
+        cymru.lookup(["8.8.8.8", "9.9.9.9"])
+
+
 def test_empty_input_makes_no_connection(fake_connect):
     created = fake_connect()
     assert cymru.lookup([]) == {}

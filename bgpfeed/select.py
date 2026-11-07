@@ -47,9 +47,8 @@ def classify_asn(
     """Решает судьбу одной ASN.
 
     `corroborated` — попал ли хотя бы один её адрес в geoip-категорию
-    сервиса. Это признак, независимый от размера ASN, и он только расширяет
-    доверие: подтверждённая ASN судится по удвоенному порогу, а
-    неподтверждённая — по обычному. Никого не выбрасываем.
+    сервиса. После T20 это только пояснение в отчёте: признак не меняет tier
+    и никого не выбрасывает.
     """
     frozen = frozenset(seen_ips)
     explicit = asn in policy.trusted_asns
@@ -67,7 +66,7 @@ def classify_asn(
         return make("trusted", "explicitly listed in config")
 
     # Пустой seen_ips означает ручную или ещё живую историческую ASN из
-    # state. Порог относится только к новым DNS-наблюдениям.
+    # state. min_ips относится только к новым DNS-наблюдениям.
     if frozen and len(frozen) < policy.min_ips:
         return make(
             "rejected",

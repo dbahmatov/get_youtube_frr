@@ -205,6 +205,16 @@ TTL, поэтому DNS-флуктуация не отзывает тысячи 
 4506 IPv4/0 IPv6 вместо 14429, MikroTik принял 4506, обе BGP-сессии
 Established. Повторный прогон add=0/remove=0. Instagram: HTTPS 200.
 
+### T22 — vds-kg: geoip:google только для подтверждения — готово
+
+`geoip:google` переключён из `announce` в `corroborate`: семь ручных ASN
+остались полными, а прямой анонс всей категории Google отключён. Итоговый
+набор уменьшился с 3215 до 1042 IPv4; повторный production-прогон дал
+add=0/remove=0. Обе BGP-сессии остались Established, MikroTik принял 1042
+префикса. Все восемь известных GGC-префиксов сохранились через ручные ASN и
+остались активны через vds-kg. Backup конфига:
+`/opt/bgpfeed/config.yaml.bak-20260731-before-geoip-corroborate`.
+
 ### Открыто с Checkpoint B
 Последний пункт — обсуждение с заказчиком.
 

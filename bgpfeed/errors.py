@@ -19,9 +19,5 @@ class FetchError(BgpfeedError):
     """Внешний источник (RADB, Cymru, фид) недоступен или ответил мусором."""
 
 
-class BudgetError(BgpfeedError):
-    """Зарезервировано для конфигурационных ошибок бюджета."""
-
-
 class AnnouncementError(BgpfeedError):
     """Сбой при работе с FRR через vtysh."""

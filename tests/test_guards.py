@@ -122,9 +122,10 @@ def test_change_ratio_ignored_without_previous():
     assert apply_guards(nets("8.8.8.0/24"), policy, previous=None) == nets("8.8.8.0/24")
 
 
-def test_change_ratio_ignored_when_unset():
+def test_change_ratio_can_be_disabled_explicitly():
     previous = nets(*[f"10.{i}.0.0/24" for i in range(100)])
-    assert apply_guards(nets("8.8.8.0/24"), DEFAULT, previous=previous) == nets("8.8.8.0/24")
+    policy = Guards(max_change_ratio=None)
+    assert apply_guards(nets("8.8.8.0/24"), policy, previous=previous) == nets("8.8.8.0/24")
 
 
 def test_growth_is_not_a_change_violation():

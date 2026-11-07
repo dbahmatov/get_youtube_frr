@@ -9,6 +9,7 @@
 анонсировать адреса, которых у сервиса давно нет.
 """
 
+import ipaddress
 import json
 import os
 import sys
@@ -107,14 +108,27 @@ def test_stale_hostname_expires():
     state = State()
     state.observe("youtube", hostnames=["old.googlevideo.com"], now=time.time() - 100 * DAY)
     state.observe("youtube", hostnames=["new.googlevideo.com"])
-    state.expire(StatePolicy(ttl_days=90))
+    state.expire("youtube", StatePolicy(ttl_days=90))
     assert state.hostnames("youtube") == ("new.googlevideo.com",)
+
+
+def test_expiry_is_scoped_to_service_and_its_own_ttl():
+    now = time.time()
+    state = State()
+    state.observe("youtube", hostnames=["old.youtube"], now=now - 10 * DAY)
+    state.observe("jetbrains", hostnames=["old.jetbrains"], now=now - 10 * DAY)
+
+    state.expire("youtube", StatePolicy(ttl_days=5), now=now)
+    state.expire("jetbrains", StatePolicy(ttl_days=30), now=now)
+
+    assert state.hostnames("youtube") == ()
+    assert state.hostnames("jetbrains") == ("old.jetbrains",)
 
 
 def test_fresh_entry_survives_expiry():
     state = State()
     state.observe("youtube", hostnames=["a.googlevideo.com"], now=time.time() - 10 * DAY)
-    state.expire(StatePolicy(ttl_days=90))
+    state.expire("youtube", StatePolicy(ttl_days=90))
     assert state.hostnames("youtube") == ("a.googlevideo.com",)
 
 
@@ -124,7 +138,7 @@ def test_reobserving_refreshes_ttl():
     old = time.time() - 100 * DAY
     state.observe("youtube", hostnames=["a.googlevideo.com"], now=old)
     state.observe("youtube", hostnames=["a.googlevideo.com"])
-    state.expire(StatePolicy(ttl_days=90))
+    state.expire("youtube", StatePolicy(ttl_days=90))
     assert state.hostnames("youtube") == ("a.googlevideo.com",)
 
 
@@ -132,21 +146,32 @@ def test_manual_asns_never_expire():
     """`keep_manual_forever`: воля оператора не протухает по таймеру."""
     state = State()
     state.observe("youtube", asns=[36561], manual=True, now=time.time() - 1000 * DAY)
-    state.expire(StatePolicy(ttl_days=90, keep_manual_forever=True))
+    state.expire("youtube", StatePolicy(ttl_days=90, keep_manual_forever=True))
     assert 36561 in state.asns("youtube")
 
 
 def test_manual_asns_expire_when_policy_disabled():
     state = State()
     state.observe("youtube", asns=[36561], manual=True, now=time.time() - 1000 * DAY)
-    state.expire(StatePolicy(ttl_days=90, keep_manual_forever=False))
+    state.expire("youtube", StatePolicy(ttl_days=90, keep_manual_forever=False))
     assert 36561 not in state.asns("youtube")
+
+
+def test_manual_asns_are_synchronized_with_config():
+    state = State()
+    old = time.time() - 1000 * DAY
+    state.observe("youtube", asns=[36561, 15169], manual=True, now=old)
+
+    state.sync_manual("youtube", [36561])
+    state.expire("youtube", StatePolicy(ttl_days=90, keep_manual_forever=True))
+
+    assert state.asns("youtube") == (36561,)
 
 
 def test_expiry_is_persisted(path):
     state = State()
     state.observe("youtube", hostnames=["old.host"], now=time.time() - 100 * DAY)
-    state.expire(StatePolicy(ttl_days=90))
+    state.expire("youtube", StatePolicy(ttl_days=90))
     save_state(state, path)
     assert load_state(path).hostnames("youtube") == ()
 
@@ -196,6 +221,13 @@ def test_saved_file_is_readable_json(path):
     with open(path, encoding="utf-8") as handle:
         data = json.load(handle)
     assert "youtube" in data["services"]
+
+
+def test_managed_prefixes_survive_roundtrip(path):
+    state = State()
+    state.set_managed([ipaddress.ip_network("8.8.8.0/24")])
+    save_state(state, path)
+    assert load_state(path).managed() == ("8.8.8.0/24",)
 
 
 # --- ref фидов ---
